@@ -7,12 +7,6 @@
 		<TargetFramework>net8.0-windows</TargetFramework>
 
 		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
-		<SelfContained>true</SelfContained>
-
-		<PublishSingleFile>true</PublishSingleFile>
-		<IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
-		<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-		<EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
 
 		<!-- Disable trimming -->
 		<PublishTrimmed>false</PublishTrimmed>
@@ -20,7 +14,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="NAudio" Version="2.2.1" />
+	  <PackageReference Include="CSCore" Version="1.2.1.2" />
 	</ItemGroup>
 
 </Project>

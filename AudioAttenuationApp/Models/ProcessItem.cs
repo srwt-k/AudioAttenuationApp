@@ -2,9 +2,9 @@
 
 namespace AudioAttenuationApp.Models
 {
-    public class ProcessItem(uint id, string name, Icon icon)
+    public class ProcessItem(int id, string name, Icon icon)
     {
-        public uint Id { get; set; } = id;
+        public int Id { get; set; } = id;
         public string Name { get; set; } = name;
         public Icon Icon { get; set;  } = icon;
     }

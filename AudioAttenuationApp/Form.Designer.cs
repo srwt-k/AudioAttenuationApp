@@ -1,6 +1,6 @@
 ﻿using AudioAttenuationApp.Helper;
 using AudioAttenuationApp.Models;
-using NAudio.CoreAudioApi;
+using CSCore.CoreAudioAPI;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -32,7 +32,7 @@ namespace AudioAttenuationApp
 
         private CancellationTokenSource adjustCts;
 
-        private uint? selectedProcessId = null;
+        private int? selectedProcessId = null;
         private const int DEFAULT_LOW_VOLUME = 30;
         private float lowerVolumeLimit = DEFAULT_LOW_VOLUME / 100.0f;
 
@@ -130,7 +130,7 @@ namespace AudioAttenuationApp
 
             try
             {
-                var list = await Task.Run(() => GetProcessList(processCts.Token),processCts.Token);
+                var list = await Task.Run(() => GetProcessList(processCts.Token), processCts.Token);
                 foreach (var item in list)
                     processListBox.Items.Add(
                         new ProcessItem(item.Id, item.Name, item.Icon)
@@ -153,24 +153,23 @@ namespace AudioAttenuationApp
 
         private List<ProcessItem> GetProcessList(CancellationToken token)
         {
-            var processList = new List<ProcessItem>();
-            var sessions = GetDefaultAudioSessionManager(DataFlow.Render);
+            var result = new List<ProcessItem>();
 
-            for (int i = 0; i < sessions.Count; i++)
+            using var sessionManager = GetDefaultAudioSessionManager2(DataFlow.Render);
+            using var sessions = sessionManager.GetSessionEnumerator();
+
+            foreach (var s in sessions)
             {
                 token.ThrowIfCancellationRequested();
 
-                var session = sessions[i];
-                if (session.GetProcessID > 0)
-                {
-                    processList.Add(new ProcessItem(
-                        session.GetProcessID,
-                        GetSessionName(session),
-                     GetSessionIcon(session)));
-                }
+                using var session = s.QueryInterface<AudioSessionControl2>();
+                result.Add(new ProcessItem(
+                    session.ProcessID,
+                    GetSessionName(session),
+                    GetSessionIcon(session)));
             }
 
-            return processList;
+            return result;
         }
 
         #endregion
@@ -184,61 +183,66 @@ namespace AudioAttenuationApp
             Task.Run(() => DetectAudioLoop(detectCts.Token), detectCts.Token);
         }
 
-        private async void DetectAudioLoop(CancellationToken token)
+        private async Task DetectAudioLoop(CancellationToken token)
         {
             AudioMeterInformation trackedMeter = null;
-            HashSet<string> previousSession = new HashSet<string>();
+            HashSet<string> previousSessions = new();
 
             try
             {
                 while (!token.IsCancellationRequested)
                 {
-                    var sessions = GetDefaultAudioSessionManager(DataFlow.Render);
-                    HashSet<string> currentSession = new HashSet<string>();
+                    HashSet<string> currentSessions = new();
 
-                    for (int i = 0; i < sessions.Count; i++)
+                    using var sessionManager = GetDefaultAudioSessionManager2(DataFlow.Render);
+                    using var sessions = sessionManager.GetSessionEnumerator();
+
+                    foreach (var s in sessions)
                     {
                         token.ThrowIfCancellationRequested();
 
-                        var session = sessions[i];
-                        if (session.GetProcessID == selectedProcessId)
+                        using var session = s.QueryInterface<AudioSessionControl2>();
+
+                        currentSessions.Add(session.SessionInstanceIdentifier);
+
+                        if (session.ProcessID == selectedProcessId)
                         {
-                            trackedMeter = session.AudioMeterInformation;
+                            trackedMeter?.Dispose();
+                            trackedMeter = session.QueryInterface<AudioMeterInformation>();
                         }
-                        currentSession.Add(session.GetSessionIdentifier);
-                        session.Dispose();
                     }
 
-                    bool isNoSound = trackedMeter.MasterPeakValue < 0.001f;
-                    if (isNoSound)
+                    if (trackedMeter != null)
                     {
-                        silentWatch.Start();
-                    }
-                    else
-                    {
-                        silentWatch.Reset();
-                    }
-                    AdjustingStage currentStage;
-                    if (silentWatch.ElapsedMilliseconds >= silentThresholdMs && isNoSound)
-                    {
-                        currentStage = AdjustingStage.Up;
-                    }
-                    else
-                    {
-                        currentStage = AdjustingStage.Down;
-                    }
+                        bool isNoSound = trackedMeter.GetPeakValue() < 0.001f;
 
-                    if (currentStage != PreviousStage && currentStage != AdjustingStage.None || !previousSession.SetEquals(currentSession))
-                    {
-                        adjustCts?.Cancel();
-                        adjustCts?.Dispose();
+                        if (isNoSound)
+                            silentWatch.Start();
+                        else
+                            silentWatch.Reset();
 
-                        adjustCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                        AdjustingStage currentStage;
 
-                        _ = Task.Run(() => AdjustVolume(currentStage, adjustCts.Token));
-                        Debug.WriteLine($"Adjusting Stage: {currentStage}");
-                        PreviousStage = currentStage;
-                        previousSession = currentSession;
+                        if (isNoSound && silentWatch.ElapsedMilliseconds >= silentThresholdMs)
+                            currentStage = AdjustingStage.Up;
+                        else
+                            currentStage = AdjustingStage.Down;
+
+                        if ((currentStage != PreviousStage && currentStage != AdjustingStage.None)
+                            || !previousSessions.SetEquals(currentSessions))
+                        {
+                            adjustCts?.Cancel();
+                            adjustCts?.Dispose();
+
+                            adjustCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+
+                            _ = Task.Run(() => AdjustVolume(currentStage, adjustCts.Token));
+
+                            Debug.WriteLine($"Adjusting Stage: {currentStage}");
+
+                            PreviousStage = currentStage;
+                            previousSessions = currentSessions;
+                        }
                     }
 
                     await Task.Delay(300, token).ConfigureAwait(false);
@@ -248,70 +252,87 @@ namespace AudioAttenuationApp
             {
                 Debug.WriteLine("Audio detection loop cancelled.");
             }
+            finally
+            {
+                trackedMeter?.Dispose();
+
+                adjustCts?.Cancel();
+                adjustCts?.Dispose();
+                adjustCts = null;
+            }
         }
-        private async void AdjustVolume(AdjustingStage stage, CancellationToken token)
+
+        private async Task AdjustVolume(AdjustingStage stage, CancellationToken token)
         {
             var tasks = new List<Task>();
-            var sessions = GetDefaultAudioSessionManager(DataFlow.Render);
 
-            for (int i = 0; i < sessions.Count; i++)
+            using var sessionManager = GetDefaultAudioSessionManager2(DataFlow.Render);
+            using var sessions = sessionManager.GetSessionEnumerator();
+
+            foreach (var s in sessions)
             {
                 token.ThrowIfCancellationRequested();
 
-                var session = sessions[i];
+                using var session = s.QueryInterface<AudioSessionControl2>();
 
-                if (session.GetProcessID == selectedProcessId)
+                if (session.ProcessID == selectedProcessId)
                     continue;
 
-                var fader = new VolumeFader(session.SimpleAudioVolume);
+                // Capture everything per-iteration
+                var simpleVolume = session.QueryInterface<SimpleAudioVolume>();
 
                 tasks.Add(Task.Run(async () =>
                 {
-                    using (fader)
+                    using (simpleVolume)
+                    using (var fader = new VolumeFader(simpleVolume))
                     {
                         switch (stage)
                         {
                             case AdjustingStage.Up:
-                                await fader.FadeToAsync(1.0f, 240, 15);
+                                await fader.FadeToAsync(1.0f, 240, 15)
+                                           .ConfigureAwait(false);
                                 break;
+
                             case AdjustingStage.Down:
-                                await fader.FadeToAsync(lowerVolumeLimit, 200, 13);
+                                await fader.FadeToAsync(lowerVolumeLimit, 200, 13)
+                                           .ConfigureAwait(false);
                                 break;
                         }
                     }
                 }, token));
             }
 
-            await Task.WhenAll(tasks);
+            await Task.WhenAll(tasks).ConfigureAwait(false);
         }
 
         #endregion
 
         #region Helper functions
 
-        private SessionCollection GetDefaultAudioSessionManager(DataFlow dataFlow, Role role = Role.Multimedia)
+        private AudioSessionManager2 GetDefaultAudioSessionManager2(DataFlow dataFlow, Role role = Role.Multimedia)
         {
-            using var enumerator = new MMDeviceEnumerator();
-            using var device = enumerator.GetDefaultAudioEndpoint(dataFlow, role);
-            return device.AudioSessionManager.Sessions;
+            var enumerator = new MMDeviceEnumerator();
+            var device = enumerator.GetDefaultAudioEndpoint(dataFlow, role);
+            enumerator.Dispose();
+            return AudioSessionManager2.FromMMDevice(device);
         }
 
-        private string GetSessionName(AudioSessionControl session)
+        private string GetSessionName(AudioSessionControl2 session)
         {
-            try
-            {
-                var process = Process.GetProcessById((int)session.GetProcessID);
-                return process.ProcessName;
-            }
-            catch
-            {
-                Debug.WriteLine("Failed to get process name for " + session.GetProcessID);
-            }
+            // System sound
+            if (session.IsSystemSoundSession)
+                return "System Sounds";
+            // Process name
+            if (!string.IsNullOrEmpty(session.Process.ProcessName))
+                return session.Process.ProcessName;
+            // Display name
+            if (!string.IsNullOrEmpty(session.DisplayName))
+                return session.DisplayName;
 
-            return "System Sounds";
+            return "Unknown";
         }
 
-        private Icon GetSessionIcon(AudioSessionControl session)
+        private Icon GetSessionIcon(AudioSessionControl2 session)
         {
             // Session icon
             if (!string.IsNullOrEmpty(session.IconPath))
@@ -320,12 +341,11 @@ namespace AudioAttenuationApp
             // Process icon
             try
             {
-                var process = Process.GetProcessById((int)session.GetProcessID);
-                return Icon.ExtractAssociatedIcon(process.MainModule.FileName);
+                return Icon.ExtractAssociatedIcon(session.Process.MainModule.FileName);
             }
             catch
             {
-                Debug.WriteLine("Failed to get process icon for " + session.GetProcessID);
+                Debug.WriteLine("Failed to get process icon for " + session.ProcessID);
             }
 
             // Fallback
@@ -555,4 +575,3 @@ namespace AudioAttenuationApp
         #endregion
     }
 }
-

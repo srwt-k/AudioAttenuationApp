@@ -1,6 +1,5 @@
-﻿using NAudio.CoreAudioApi;
+﻿using CSCore.CoreAudioAPI;
 using System;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace AudioAttenuationApp.Helper
@@ -28,7 +27,7 @@ namespace AudioAttenuationApp.Helper
         {
 
             simpleAudioVolume = volume;
-            CurrentVolume = volume.Volume;
+            CurrentVolume = volume.MasterVolume;
         }
 
         /// <summary>
@@ -50,7 +49,7 @@ namespace AudioAttenuationApp.Helper
                 float progress = (float)i / steps;
                 CurrentVolume = startVolume + diff * progress;
                 //Debug.WriteLine($"Volume: {CurrentVolume:0.00}");
-                simpleAudioVolume.Volume = CurrentVolume;
+                simpleAudioVolume.MasterVolume = CurrentVolume;
                 await Task.Delay(stepTimeMs);
             }
 
